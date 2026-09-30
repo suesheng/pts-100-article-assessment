@@ -53,9 +53,36 @@ export type CallResult = {
  */
 export async function callTool(opts: CallOptions): Promise<CallResult> {
   const provider = getProvider();
-  if (provider === "openrouter") return callViaOpenRouter(opts);
-  if (provider === "anthropic") return callViaAnthropic(opts);
-  throw new ModelError("No model provider configured.");
+  const startedAt = Date.now();
+  console.log("[pts:model] request started", {
+    provider,
+    tool: opts.tool.name,
+    model: opts.model,
+    userChars: opts.user.length,
+    schemaFields: Object.keys((opts.tool.input_schema.properties as Record<string, unknown> | undefined) ?? {}),
+  });
+  try {
+    const result = provider === "openrouter"
+      ? await callViaOpenRouter(opts)
+      : provider === "anthropic"
+        ? await callViaAnthropic(opts)
+        : (() => { throw new ModelError("No model provider configured."); })();
+    console.log("[pts:model] request completed", { provider, tool: opts.tool.name, model: result.meta.model, durationMs: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    const e = error instanceof Error ? error : new Error(String(error));
+    console.error("[pts:model] request failed", {
+      provider,
+      tool: opts.tool.name,
+      model: opts.model,
+      durationMs: Date.now() - startedAt,
+      errorClass: e.constructor.name,
+      errorName: e.name,
+      errorMessage: e.message,
+      stack: e.stack,
+    });
+    throw error;
+  }
 }
 
 function isBadModel(status: number, body: string): boolean {

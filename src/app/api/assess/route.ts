@@ -2,82 +2,68 @@ import { NextRequest, NextResponse } from "next/server";
 import { extractFromUrl, fromRawText } from "@/lib/extract";
 import { scoreFromParts } from "@/lib/assess";
 import { MIN_BODY_CHARS } from "@/lib/rubric";
-import type { ArticleParts, Designation } from "@/lib/types";
+import { normaliseAssessmentRequest, RequestValidationError } from "@/lib/request";
+import type { ArticleParts } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
-const DESIGNATIONS: Designation[] = [
-  "ARTICLE",
-  "OPINION",
-  "POST",
-  "DOCUMENTARY",
-  "SATIRE",
-];
+type Stage = "request-parse" | "request-validation" | "article-extraction" | "article-parsing" | "model-request" | "scoring";
 
-type Body = {
-  url?: string;
-  text?: string;
-  title?: string;
-  designation?: string;
-  language?: string;
-};
+function logFailure(stage: Stage, field: string | undefined, value: unknown, error: unknown): void {
+  const e = error instanceof Error ? error : new Error(String(error));
+  console.error("[pts:assessment] stage failed", {
+    stage,
+    field,
+    valueShape: Array.isArray(value) ? `array(${value.length})` : typeof value,
+    valueLength: typeof value === "string" ? value.length : undefined,
+    errorClass: e.constructor.name,
+    errorName: e.name,
+    errorMessage: e.message,
+    stack: e.stack,
+  });
+}
 
 export async function POST(req: NextRequest) {
-  let payload: Body;
+  let payload: unknown;
   try {
     payload = await req.json();
-  } catch {
+  } catch (error) {
+    logFailure("request-parse", undefined, undefined, error);
     return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
-  const url = payload.url?.trim();
-  const text = payload.text?.trim();
-
-  if (!url && !text) {
+  let input;
+  try {
+    input = normaliseAssessmentRequest(payload);
+  } catch (error) {
+    const field = error instanceof RequestValidationError ? error.field : undefined;
+    const value = field && payload && typeof payload === "object" ? (payload as Record<string, unknown>)[field] : undefined;
+    logFailure("request-validation", field, value, error);
     return NextResponse.json(
-      { error: "Provide either a URL or article text." },
+      { error: error instanceof RequestValidationError ? error.message : "Assessment request validation failed." },
       { status: 400 },
     );
   }
 
-  let designation: Designation | undefined;
-  if (payload.designation && payload.designation !== "auto") {
-    const d = payload.designation.toUpperCase();
-    if (!DESIGNATIONS.includes(d as Designation)) {
-      return NextResponse.json(
-        { error: `Unknown designation: ${payload.designation}` },
-        { status: 400 },
-      );
-    }
-    designation = d as Designation;
-  }
-
-  const language = payload.language?.trim() || undefined;
+  const { url, text, title, designation, language } = input;
 
   try {
     let parts: ArticleParts;
 
     if (url) {
       try {
-        new URL(url);
-      } catch {
-        return NextResponse.json(
-          { error: "That is not a valid URL." },
-          { status: 400 },
-        );
-      }
-      try {
         parts = await extractFromUrl(url);
       } catch (e) {
+        logFailure("article-extraction", "url", url, e);
         return NextResponse.json(
-          { error: e instanceof Error ? e.message : "Failed to fetch URL." },
+          { error: "Article extraction failed. The site may block automated access; paste the article text instead." },
           { status: 422 },
         );
       }
     } else {
       parts = fromRawText(text!, {
-        headline: payload.title,
+        headline: title,
         language,
       });
     }
@@ -95,10 +81,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const result = await scoreFromParts(parts, {
-      designation,
-      languageHint: language,
-    });
+    let result;
+    try {
+      result = await scoreFromParts(parts, { designation, languageHint: language });
+    } catch (error) {
+      logFailure("model-request", undefined, undefined, error);
+      throw error;
+    }
 
     // Production safety: no real provider → no PTS result (never 100/100).
     if (result.score.analysis_unavailable) {
@@ -138,14 +127,12 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(result);
   } catch (e) {
+    logFailure("scoring", undefined, undefined, e);
     const stopReason = (e as { stop_reason?: string })?.stop_reason;
     const isModelError = e instanceof Error && e.name === "ModelError";
     return NextResponse.json(
       {
-        error:
-          e instanceof Error
-            ? e.message
-            : "Assessment failed. Check the server logs.",
+        error: isModelError ? "Model response validation failed." : "Assessment service unavailable.",
         ...(stopReason ? { stop_reason: stopReason } : {}),
       },
       { status: isModelError ? 502 : 500 },

@@ -47,7 +47,10 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const contentType = res.headers.get("content-type") || "";
+      const data = contentType.includes("application/json")
+        ? await res.json()
+        : { error: res.status === 504 ? "Assessment service timed out. Please try again." : "Assessment service unavailable." };
       if (!res.ok) {
         if (data.stop_reason) setStopReason(String(data.stop_reason));
         throw new Error(data.error || "Assessment failed.");

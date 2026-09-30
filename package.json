@@ -8,6 +8,7 @@
     "start": "next start -p 43127",
     "lint": "eslint",
     "selftest": "tsx scripts/selftest.mjs",
+    "test:request": "tsx --test tests/request.test.ts",
     "test:adversarial": "tsx scripts/adversarial.mjs",
     "demo:bad": "tsx scripts/demo.mjs --demo-bad --debug",
     "test:endpoint": "node scripts/endpoint.test.mjs",

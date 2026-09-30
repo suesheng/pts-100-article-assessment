@@ -343,7 +343,7 @@ export async function runProsecutorOnce(
   opts: { designation?: Designation | string | null; languageHint?: string | null },
 ): Promise<Prosecution> {
   const merged: Prosecution = { allegations: [], candidate_passages: [], claims: [], dismissed_lexicon_hits: [] };
-  for (const chunk of chunks) {
+  const results = await Promise.all(chunks.map(async (chunk) => {
     const res = await callTool({
       system: PROSECUTOR_SYSTEM_PROMPT,
       user: prosecutorUserPrompt(chunk.text, chunk.header, hitsText, opts),
@@ -351,7 +351,9 @@ export async function runProsecutorOnce(
       model: PROSECUTOR_MODEL,
       temperature: PROSECUTOR_TEMPERATURE,
     });
-    const p = (res.input ?? {}) as Partial<Prosecution>;
+    return (res.input ?? {}) as Partial<Prosecution>;
+  }));
+  for (const p of results) {
     if (Array.isArray(p.allegations)) merged.allegations.push(...p.allegations);
     if (Array.isArray(p.candidate_passages)) merged.candidate_passages.push(...p.candidate_passages);
     if (Array.isArray(p.claims)) merged.claims.push(...p.claims);
@@ -658,20 +660,17 @@ export async function assessTwoPass(
   const chunks = bodyChunks.map((c) => ({ text: c.text, header }));
 
   // Prosecutor: N independent runs at temperature 0.7 (each over every chunk).
-  const runs: Prosecution[] = [];
-  for (let r = 0; r < PROSECUTOR_RUNS; r++) {
-    runs.push(await runProsecutorOnce(chunks, hitsText, opts));
-  }
+  const runs = await Promise.all(
+    Array.from({ length: PROSECUTOR_RUNS }, () => runProsecutorOnce(chunks, hitsText, opts)),
+  );
   const { merged, candidate_passages, claims, dismissed } = mergeRuns(runs);
 
   // Judge: precision pass on the FULL text (never chunked).
-  const judgements: Judgement[] = [];
-  let judgeModel = JUDGE_MODEL;
-  for (let r = 0; r < JUDGE_RUNS; r++) {
-    const jr = await runJudgeOnce(fullText, merged);
-    judgements.push(jr.judgement);
-    judgeModel = jr.model;
-  }
+  const judgeResults = await Promise.all(
+    Array.from({ length: JUDGE_RUNS }, () => runJudgeOnce(fullText, merged)),
+  );
+  const judgements = judgeResults.map((result) => result.judgement);
+  const judgeModel = judgeResults.at(-1)?.model ?? JUDGE_MODEL;
   const judgement = combineJudgements(judgements);
 
   const { consistency, note } = computeConsistency(merged, judgement.verdicts ?? [], PROSECUTOR_RUNS);
